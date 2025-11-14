@@ -1,0 +1,345 @@
+Option Explicit
+
+' =======================
+' Macro principal
+' =======================
+Sub CompararConCorporativo()
+
+    Dim ruta As Variant
+    Dim wbCorp As Workbook
+    Dim wbThis As Workbook
+    Dim wsRep As Worksheet
+    Dim wsSEM As Worksheet
+    Dim ws12 As Worksheet
+    Dim wsOut As Worksheet
+    
+    Dim dicHX As Object
+    Dim dicInc As Object
+    Dim dicBonoNoc As Object
+    Dim dicPrest As Object
+    Dim dicBonoMensual As Object
+    
+    Dim colNo As Long, colNom As Long
+    Dim colIncRep As Long, colBonoNocRep As Long
+    Dim colHXRep As Long, colPrestRep As Long
+    Dim colBonoMensualRep As Long
+    
+    Dim ultimaFila As Long, fila As Long, filaOut As Long
+    Dim noNomina As String, nombre As String
+    Dim montoRep As Double, montoCorp As Double, diff As Double
+    
+    Dim tolerInc As Double, tolerBonoNoc As Double
+    Dim tolerHX As Double, tolerPrest As Double
+    Dim tolerBonoMensual As Double
+    
+    ' Tolerancias (ajústalas si quieres)
+    tolerInc = 0.5
+    tolerBonoNoc = 0.5
+    tolerHX = 0.01
+    tolerPrest = 0          ' préstamos sin margen
+    tolerBonoMensual = 0.5  ' bono mensual
+    
+    Set wbThis = ThisWorkbook
+    Set wsRep = wbThis.Worksheets("generador_reporte_semanal")
+    
+    ' 1) Pedir archivo del corporativo
+    ruta = Application.GetOpenFilename("Archivos de Excel (*.xlsx;*.xlsm), *.xlsx;*.xlsm")
+    If ruta = False Then
+        MsgBox "No se seleccionó archivo.", vbInformation
+        Exit Sub
+    End If
+    
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    
+    Set wbCorp = Workbooks.Open(ruta, ReadOnly:=True)
+    
+    ' 2) Buscar hojas "SEM ... CPI" y "12x36 ... CPI"
+    Dim sh As Worksheet
+    For Each sh In wbCorp.Worksheets
+        If wsSEM Is Nothing Then
+            If sh.Name Like "SEM *CPI*" Then Set wsSEM = sh
+        End If
+        If ws12 Is Nothing Then
+            If sh.Name Like "12x36 *CPI*" Then Set ws12 = sh
+        End If
+    Next sh
+    
+    If wsSEM Is Nothing And ws12 Is Nothing Then
+        MsgBox "No encontré hojas 'SEM ... CPI' ni '12x36 ... CPI' en el archivo del corporativo.", vbCritical
+        GoTo Salir
+    End If
+    
+    ' 3) Crear diccionarios
+    Set dicHX = CreateObject("Scripting.Dictionary")
+    Set dicInc = CreateObject("Scripting.Dictionary")
+    Set dicBonoNoc = CreateObject("Scripting.Dictionary")
+    Set dicPrest = CreateObject("Scripting.Dictionary")
+    Set dicBonoMensual = CreateObject("Scripting.Dictionary")
+    
+    ' 4) Cargar datos del corporativo
+    Call CargarCorporativoHoja(wsSEM, dicHX, dicInc, dicBonoNoc, dicPrest, dicBonoMensual)
+    Call CargarCorporativoHoja(ws12, dicHX, dicInc, dicBonoNoc, dicPrest, dicBonoMensual)
+    
+    ' 5) Cerrar archivo corporativo
+    wbCorp.Close SaveChanges:=False
+    
+    ' 6) Preparar hoja de salida
+    On Error Resume Next
+    Set wsOut = wbThis.Worksheets("Comparación")
+    On Error GoTo 0
+    If wsOut Is Nothing Then
+        Set wsOut = wbThis.Worksheets.Add(After:=wbThis.Worksheets(wbThis.Worksheets.Count))
+        wsOut.Name = "Comparación"
+    End If
+    wsOut.Cells.Clear
+    
+    wsOut.Range("A1:H1").Value = Array("No nomina", "Nombre", "Concepto", _
+                                       "Monto Registro RH", "Monto Corporativo", _
+                                       "Diferencia", "Comentario", "Detalle")
+    
+    ' 7) Localizar columnas en generador_reporte_semanal
+    colNo = BuscarColumna(wsRep, "No nomina", 1)
+    colNom = BuscarColumna(wsRep, "Nombre", 1)
+    colIncRep = BuscarColumna(wsRep, "Incentivo", 1)
+    colBonoNocRep = BuscarColumna(wsRep, "Bono nocturno", 1)
+    colHXRep = BuscarColumna(wsRep, "Hrs Extra", 1)
+    colPrestRep = BuscarColumna(wsRep, "Préstamo", 1)
+    colBonoMensualRep = BuscarColumna(wsRep, "Bono Mensual", 1)
+    
+    If colNo = 0 Or colNom = 0 Then
+        MsgBox "No encontré las columnas 'No nomina' o 'Nombre' en tu reporte.", vbCritical
+        GoTo Salir
+    End If
+    
+    ultimaFila = wsRep.Cells(wsRep.Rows.Count, colNo).End(xlUp).Row
+    filaOut = 2
+    
+    ' 8) Recorrer empleados de tu reporte
+    For fila = 2 To ultimaFila
+        If Trim(wsRep.Cells(fila, colNo).Value) <> "" Then
+        
+            noNomina = NormalizaCodigo(wsRep.Cells(fila, colNo).Value)
+            nombre = wsRep.Cells(fila, colNom).Value
+            
+            ' -------- Incentivo --------
+            If colIncRep > 0 Then
+                montoRep = Nz(wsRep.Cells(fila, colIncRep).Value)
+                montoCorp = 0
+                If dicInc.Exists(noNomina) Then montoCorp = dicInc(noNomina)
+                diff = montoRep - montoCorp
+                
+                LlenarFilaSalida wsOut, filaOut, noNomina, nombre, _
+                                 "Incentivo", montoRep, montoCorp, diff, tolerInc
+                filaOut = filaOut + 1
+            End If
+            
+            ' -------- Bono nocturno --------
+            If colBonoNocRep > 0 Then
+                montoRep = Nz(wsRep.Cells(fila, colBonoNocRep).Value)
+                montoCorp = 0
+                If dicBonoNoc.Exists(noNomina) Then montoCorp = dicBonoNoc(noNomina)
+                diff = montoRep - montoCorp
+                
+                LlenarFilaSalida wsOut, filaOut, noNomina, nombre, _
+                                 "Bono nocturno", montoRep, montoCorp, diff, tolerBonoNoc
+                filaOut = filaOut + 1
+            End If
+            
+            ' -------- Horas Extra --------
+            If colHXRep > 0 Then
+                montoRep = Nz(wsRep.Cells(fila, colHXRep).Value)
+                montoCorp = 0
+                If dicHX.Exists(noNomina) Then montoCorp = dicHX(noNomina)
+                diff = montoRep - montoCorp
+                
+                LlenarFilaSalida wsOut, filaOut, noNomina, nombre, _
+                                 "Hrs Extra", montoRep, montoCorp, diff, tolerHX
+                filaOut = filaOut + 1
+            End If
+            
+            ' -------- Préstamo --------
+            If colPrestRep > 0 Then
+                montoRep = Nz(ExtraeAbonoPrestamo(wsRep.Cells(fila, colPrestRep).Value))
+                montoCorp = 0
+                If dicPrest.Exists(noNomina) Then montoCorp = dicPrest(noNomina)
+                diff = montoRep - montoCorp
+                
+                LlenarFilaSalida wsOut, filaOut, noNomina, nombre, _
+                                 "Préstamo", montoRep, montoCorp, diff, tolerPrest
+                filaOut = filaOut + 1
+            End If
+            
+            ' -------- Bono Mensual (Premio de Asistencia) --------
+            If colBonoMensualRep > 0 Then
+                montoRep = Nz(wsRep.Cells(fila, colBonoMensualRep).Value)
+                montoCorp = 0
+                If dicBonoMensual.Exists(noNomina) Then montoCorp = dicBonoMensual(noNomina)
+                diff = montoRep - montoCorp
+                
+                LlenarFilaSalida wsOut, filaOut, noNomina, nombre, _
+                                 "Bono Mensual (Premio Asistencia)", _
+                                 montoRep, montoCorp, diff, tolerBonoMensual
+                filaOut = filaOut + 1
+            End If
+            
+        End If
+    Next fila
+    
+    ' 9) Formato rápido
+    wsOut.Columns.AutoFit
+    MsgBox "Comparación terminada. Revisa la hoja 'Comparación'.", vbInformation
+
+Salir:
+    Application.ScreenUpdating = True
+    Application.EnableEvents = True
+
+End Sub
+
+' =======================
+' Carga de datos del corporativo
+' =======================
+Sub CargarCorporativoHoja(ws As Worksheet, _
+                          dicHX As Object, dicInc As Object, _
+                          dicBonoNoc As Object, dicPrest As Object, _
+                          dicBonoMensual As Object)
+    If ws Is Nothing Then Exit Sub
+    
+    Dim colCod As Long, colHX As Long, colInc As Long
+    Dim colBono As Long, colPrest As Long
+    Dim colPremioAsis As Long
+    Dim ultimaFila As Long, fila As Long
+    Dim codigo As String
+    Dim val As Double
+    
+    ' Encabezados en la fila 8
+    colCod = BuscarColumna(ws, "Código", 8)
+    colHX = BuscarColumna(ws, "Horas extras", 8)
+    colInc = BuscarColumna(ws, "Incentivo productividad", 8)
+    colBono = BuscarColumna(ws, "Bono turno nocturno", 8) ' solo existe en 12x36
+    colPrest = BuscarColumna(ws, "Préstamo empresa", 8)
+    colPremioAsis = BuscarColumna(ws, "Premio de Asistencia", 8)
+    
+    If colCod = 0 Then Exit Sub
+    
+    ultimaFila = ws.Cells(ws.Rows.Count, colCod).End(xlUp).Row
+    
+    For fila = 9 To ultimaFila
+        If Trim(ws.Cells(fila, colCod).Value) <> "" Then
+            
+            codigo = NormalizaCodigo(ws.Cells(fila, colCod).Value)
+            
+            ' Horas extras
+            If colHX > 0 Then
+                val = Nz(ws.Cells(fila, colHX).Value)
+                If val <> 0 Then AgregaAlDic dicHX, codigo, val
+            End If
+            
+            ' Incentivo
+            If colInc > 0 Then
+                val = Nz(ws.Cells(fila, colInc).Value)
+                If val <> 0 Then AgregaAlDic dicInc, codigo, val
+            End If
+            
+            ' Bono nocturno
+            If colBono > 0 Then
+                val = Nz(ws.Cells(fila, colBono).Value)
+                If val <> 0 Then AgregaAlDic dicBonoNoc, codigo, val
+            End If
+            
+            ' Préstamo empresa
+            If colPrest > 0 Then
+                val = Nz(ws.Cells(fila, colPrest).Value)
+                If val <> 0 Then AgregaAlDic dicPrest, codigo, val
+            End If
+            
+            ' Premio de Asistencia (Bono Mensual)
+            If colPremioAsis > 0 Then
+                val = Nz(ws.Cells(fila, colPremioAsis).Value)
+                If val <> 0 Then AgregaAlDic dicBonoMensual, codigo, val
+            End If
+            
+        End If
+    Next fila
+
+End Sub
+
+' =======================
+' Helpers generales
+' =======================
+
+Sub AgregaAlDic(dic As Object, clave As String, valor As Double)
+    If dic.Exists(clave) Then
+        dic(clave) = dic(clave) + valor
+    Else
+        dic.Add clave, valor
+    End If
+End Sub
+
+Function BuscarColumna(ws As Worksheet, titulo As String, filaEncabezado As Long) As Long
+    Dim c As Range
+    For Each c In ws.Rows(filaEncabezado).Cells
+        If Trim(CStr(c.Value)) = titulo Then
+            BuscarColumna = c.Column
+            Exit Function
+        End If
+    Next c
+    BuscarColumna = 0
+End Function
+
+Function NormalizaCodigo(valor As Variant) As String
+    Dim s As String
+    s = Trim(CStr(valor))
+    If IsNumeric(s) Then
+        s = CStr(CLng(s))  ' quita ceros a la izquierda
+    End If
+    NormalizaCodigo = s
+End Function
+
+Function Nz(v As Variant) As Double
+    If IsError(v) Then
+        Nz = 0
+    ElseIf IsEmpty(v) Then
+        Nz = 0
+    ElseIf v = "" Then
+        Nz = 0
+    Else
+        Nz = v
+    End If
+End Function
+
+Function ExtraeAbonoPrestamo(v As Variant) As Double
+    ' Convierte "100 (2/10)" en 100
+    Dim s As String
+    s = Trim(CStr(v))
+    If s = "" Then
+        ExtraeAbonoPrestamo = 0
+    Else
+        ExtraeAbonoPrestamo = Val(s)
+    End If
+End Function
+
+Sub LlenarFilaSalida(ws As Worksheet, ByVal filaOut As Long, _
+                     ByVal noNomina As String, ByVal nombre As String, _
+                     ByVal concepto As String, _
+                     ByVal montoRep As Double, ByVal montoCorp As Double, _
+                     ByVal diff As Double, ByVal toler As Double)
+    
+    ws.Cells(filaOut, 1).Value = noNomina
+    ws.Cells(filaOut, 2).Value = nombre
+    ws.Cells(filaOut, 3).Value = concepto
+    ws.Cells(filaOut, 4).Value = montoRep
+    ws.Cells(filaOut, 5).Value = montoCorp
+    ws.Cells(filaOut, 6).Value = diff
+    
+    If montoRep = 0 And montoCorp = 0 Then
+        ws.Cells(filaOut, 7).Value = "Sin movimiento"
+    ElseIf Abs(diff) <= toler Then
+        ws.Cells(filaOut, 7).Value = "OK (dentro de tolerancia)"
+    Else
+        ws.Cells(filaOut, 7).Value = "Revisar"
+    End If
+    
+    ws.Cells(filaOut, 8).Value = ""  ' espacio libre por si luego quieres notas manuales
+
+End Sub
