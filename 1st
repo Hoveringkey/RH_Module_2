@@ -1,345 +1,429 @@
 Option Explicit
 
-' =======================
-' Macro principal
-' =======================
-Sub CompararConCorporativo()
+' Developer: Jules
+' Version: 2.0
+' Description:
+' This macro compares financial data from a local HR report with a corporate payroll file.
+' It generates a consolidated, employee-centric report highlighting discrepancies.
 
+' =================================================================================
+'                                   MAIN SUBROUTINE
+' =================================================================================
+Sub CompararConCorporativo()
+    ' --- Configuration ---
+    Const TOLER_INCENTIVE As Double = 0.5
+    Const TOLER_NIGHT_BONUS As Double = 0.5
+    Const TOLER_MONTHLY_BONUS As Double = 0.5
+    Const TOLER_LOAN As Double = 0 ' Exact match required
+
+    ' --- Declarations ---
+    Dim wbCorp As Workbook, wbThis As Workbook
+    Dim wsRep As Worksheet, wsSEM As Worksheet, ws12 As Worksheet, wsOut As Worksheet
     Dim ruta As Variant
-    Dim wbCorp As Workbook
-    Dim wbThis As Workbook
-    Dim wsRep As Worksheet
-    Dim wsSEM As Worksheet
-    Dim ws12 As Worksheet
-    Dim wsOut As Worksheet
-    
-    Dim dicHX As Object
-    Dim dicInc As Object
-    Dim dicBonoNoc As Object
-    Dim dicPrest As Object
-    Dim dicBonoMensual As Object
-    
-    Dim colNo As Long, colNom As Long
-    Dim colIncRep As Long, colBonoNocRep As Long
-    Dim colHXRep As Long, colPrestRep As Long
-    Dim colBonoMensualRep As Long
-    
-    Dim ultimaFila As Long, fila As Long, filaOut As Long
-    Dim noNomina As String, nombre As String
-    Dim montoRep As Double, montoCorp As Double, diff As Double
-    
-    Dim tolerInc As Double, tolerBonoNoc As Double
-    Dim tolerHX As Double, tolerPrest As Double
-    Dim tolerBonoMensual As Double
-    
-    ' Tolerancias (ajústalas si quieres)
-    tolerInc = 0.5
-    tolerBonoNoc = 0.5
-    tolerHX = 0.01
-    tolerPrest = 0          ' préstamos sin margen
-    tolerBonoMensual = 0.5  ' bono mensual
-    
+    Dim dicEmpleados As Object ' Main dictionary: Key=EmpCode, Value=EmployeeData object
+
+    ' --- Initialization ---
     Set wbThis = ThisWorkbook
+    On Error Resume Next
     Set wsRep = wbThis.Worksheets("generador_reporte_semanal")
-    
-    ' 1) Pedir archivo del corporativo
-    ruta = Application.GetOpenFilename("Archivos de Excel (*.xlsx;*.xlsm), *.xlsx;*.xlsm")
-    If ruta = False Then
-        MsgBox "No se seleccionó archivo.", vbInformation
+    On Error GoTo 0
+    If wsRep Is Nothing Then
+        MsgBox "La hoja 'generador_reporte_semanal' no existe en este archivo.", vbCritical
         Exit Sub
     End If
-    
+
+    ' --- 1) Get Corporate File ---
+    ruta = Application.GetOpenFilename("Archivos de Excel (*.xlsx;*.xlsm), *.xlsx;*.xlsm", , "Seleccione el archivo del corporativo")
+    If ruta = False Then Exit Sub ' User cancelled
+
     Application.ScreenUpdating = False
     Application.EnableEvents = False
-    
+
+    ' --- 2) Open Corporate Workbook and Find Sheets ---
     Set wbCorp = Workbooks.Open(ruta, ReadOnly:=True)
-    
-    ' 2) Buscar hojas "SEM ... CPI" y "12x36 ... CPI"
     Dim sh As Worksheet
     For Each sh In wbCorp.Worksheets
-        If wsSEM Is Nothing Then
-            If sh.Name Like "SEM *CPI*" Then Set wsSEM = sh
-        End If
-        If ws12 Is Nothing Then
-            If sh.Name Like "12x36 *CPI*" Then Set ws12 = sh
-        End If
+        If wsSEM Is Nothing And sh.Name Like "SEM *CPI*" Then Set wsSEM = sh
+        If ws12 Is Nothing And sh.Name Like "12x36 *CPI*" Then Set ws12 = sh
     Next sh
-    
+
     If wsSEM Is Nothing And ws12 Is Nothing Then
-        MsgBox "No encontré hojas 'SEM ... CPI' ni '12x36 ... CPI' en el archivo del corporativo.", vbCritical
+        MsgBox "No se encontraron las hojas 'SEM ... CPI' ni '12x36 ... CPI' en el archivo del corporativo.", vbCritical
+        wbCorp.Close False
         GoTo Salir
     End If
+
+    ' --- 3) Load Data into Employee-Centric Dictionary ---
+    Set dicEmpleados = CreateObject("Scripting.Dictionary")
     
-    ' 3) Crear diccionarios
-    Set dicHX = CreateObject("Scripting.Dictionary")
-    Set dicInc = CreateObject("Scripting.Dictionary")
-    Set dicBonoNoc = CreateObject("Scripting.Dictionary")
-    Set dicPrest = CreateObject("Scripting.Dictionary")
-    Set dicBonoMensual = CreateObject("Scripting.Dictionary")
+    ' Load corporate data first
+    Call CargarDatosCorporativo(wsSEM, dicEmpleados)
+    Call CargarDatosCorporativo(ws12, dicEmpleados)
+    wbCorp.Close False
+
+    ' Load local RH data
+    Call CargarDatosRH(wsRep, dicEmpleados)
+
+    ' --- 4) Process and Compare Data ---
+    Call ProcesarDatosEmpleados(dicEmpleados, TOLER_INCENTIVE, TOLER_NIGHT_BONUS, TOLER_LOAN, TOLER_MONTHLY_BONUS)
     
-    ' 4) Cargar datos del corporativo
-    Call CargarCorporativoHoja(wsSEM, dicHX, dicInc, dicBonoNoc, dicPrest, dicBonoMensual)
-    Call CargarCorporativoHoja(ws12, dicHX, dicInc, dicBonoNoc, dicPrest, dicBonoMensual)
-    
-    ' 5) Cerrar archivo corporativo
-    wbCorp.Close SaveChanges:=False
-    
-    ' 6) Preparar hoja de salida
-    On Error Resume Next
-    Set wsOut = wbThis.Worksheets("Comparación")
-    On Error GoTo 0
-    If wsOut Is Nothing Then
-        Set wsOut = wbThis.Worksheets.Add(After:=wbThis.Worksheets(wbThis.Worksheets.Count))
-        wsOut.Name = "Comparación"
-    End If
-    wsOut.Cells.Clear
-    
-    wsOut.Range("A1:H1").Value = Array("No nomina", "Nombre", "Concepto", _
-                                       "Monto Registro RH", "Monto Corporativo", _
-                                       "Diferencia", "Comentario", "Detalle")
-    
-    ' 7) Localizar columnas en generador_reporte_semanal
-    colNo = BuscarColumna(wsRep, "No nomina", 1)
-    colNom = BuscarColumna(wsRep, "Nombre", 1)
-    colIncRep = BuscarColumna(wsRep, "Incentivo", 1)
-    colBonoNocRep = BuscarColumna(wsRep, "Bono nocturno", 1)
-    colHXRep = BuscarColumna(wsRep, "Hrs Extra", 1)
-    colPrestRep = BuscarColumna(wsRep, "Préstamo", 1)
-    colBonoMensualRep = BuscarColumna(wsRep, "Bono Mensual", 1)
-    
-    If colNo = 0 Or colNom = 0 Then
-        MsgBox "No encontré las columnas 'No nomina' o 'Nombre' en tu reporte.", vbCritical
-        GoTo Salir
-    End If
-    
-    ultimaFila = wsRep.Cells(wsRep.Rows.Count, colNo).End(xlUp).Row
-    filaOut = 2
-    
-    ' 8) Recorrer empleados de tu reporte
-    For fila = 2 To ultimaFila
-        If Trim(wsRep.Cells(fila, colNo).Value) <> "" Then
-        
-            noNomina = NormalizaCodigo(wsRep.Cells(fila, colNo).Value)
-            nombre = wsRep.Cells(fila, colNom).Value
-            
-            ' -------- Incentivo --------
-            If colIncRep > 0 Then
-                montoRep = Nz(wsRep.Cells(fila, colIncRep).Value)
-                montoCorp = 0
-                If dicInc.Exists(noNomina) Then montoCorp = dicInc(noNomina)
-                diff = montoRep - montoCorp
-                
-                LlenarFilaSalida wsOut, filaOut, noNomina, nombre, _
-                                 "Incentivo", montoRep, montoCorp, diff, tolerInc
-                filaOut = filaOut + 1
-            End If
-            
-            ' -------- Bono nocturno --------
-            If colBonoNocRep > 0 Then
-                montoRep = Nz(wsRep.Cells(fila, colBonoNocRep).Value)
-                montoCorp = 0
-                If dicBonoNoc.Exists(noNomina) Then montoCorp = dicBonoNoc(noNomina)
-                diff = montoRep - montoCorp
-                
-                LlenarFilaSalida wsOut, filaOut, noNomina, nombre, _
-                                 "Bono nocturno", montoRep, montoCorp, diff, tolerBonoNoc
-                filaOut = filaOut + 1
-            End If
-            
-            ' -------- Horas Extra --------
-            If colHXRep > 0 Then
-                montoRep = Nz(wsRep.Cells(fila, colHXRep).Value)
-                montoCorp = 0
-                If dicHX.Exists(noNomina) Then montoCorp = dicHX(noNomina)
-                diff = montoRep - montoCorp
-                
-                LlenarFilaSalida wsOut, filaOut, noNomina, nombre, _
-                                 "Hrs Extra", montoRep, montoCorp, diff, tolerHX
-                filaOut = filaOut + 1
-            End If
-            
-            ' -------- Préstamo --------
-            If colPrestRep > 0 Then
-                montoRep = Nz(ExtraeAbonoPrestamo(wsRep.Cells(fila, colPrestRep).Value))
-                montoCorp = 0
-                If dicPrest.Exists(noNomina) Then montoCorp = dicPrest(noNomina)
-                diff = montoRep - montoCorp
-                
-                LlenarFilaSalida wsOut, filaOut, noNomina, nombre, _
-                                 "Préstamo", montoRep, montoCorp, diff, tolerPrest
-                filaOut = filaOut + 1
-            End If
-            
-            ' -------- Bono Mensual (Premio de Asistencia) --------
-            If colBonoMensualRep > 0 Then
-                montoRep = Nz(wsRep.Cells(fila, colBonoMensualRep).Value)
-                montoCorp = 0
-                If dicBonoMensual.Exists(noNomina) Then montoCorp = dicBonoMensual(noNomina)
-                diff = montoRep - montoCorp
-                
-                LlenarFilaSalida wsOut, filaOut, noNomina, nombre, _
-                                 "Bono Mensual (Premio Asistencia)", _
-                                 montoRep, montoCorp, diff, tolerBonoMensual
-                filaOut = filaOut + 1
-            End If
-            
-        End If
-    Next fila
-    
-    ' 9) Formato rápido
-    wsOut.Columns.AutoFit
-    MsgBox "Comparación terminada. Revisa la hoja 'Comparación'.", vbInformation
+    ' --- 5) Generate Output Report ---
+    Call GenerarReporte(wbThis, dicEmpleados)
+
+    MsgBox "Comparación terminada. Revisa la hoja 'Comparison'.", vbInformation
 
 Salir:
     Application.ScreenUpdating = True
     Application.EnableEvents = True
-
 End Sub
 
-' =======================
-' Carga de datos del corporativo
-' =======================
-Sub CargarCorporativoHoja(ws As Worksheet, _
-                          dicHX As Object, dicInc As Object, _
-                          dicBonoNoc As Object, dicPrest As Object, _
-                          dicBonoMensual As Object)
+' =================================================================================
+'                                   DATA LOADING
+' =================================================================================
+
+' Loads data from a corporate sheet (SEM or 12x36) into the main dictionary.
+Sub CargarDatosCorporativo(ws As Worksheet, dicEmpleados As Object)
     If ws Is Nothing Then Exit Sub
-    
-    Dim colCod As Long, colHX As Long, colInc As Long
-    Dim colBono As Long, colPrest As Long
-    Dim colPremioAsis As Long
-    Dim ultimaFila As Long, fila As Long
-    Dim codigo As String
-    Dim val As Double
-    
-    ' Encabezados en la fila 8
-    colCod = BuscarColumna(ws, "Código", 8)
-    colHX = BuscarColumna(ws, "Horas extras", 8)
-    colInc = BuscarColumna(ws, "Incentivo productividad", 8)
-    colBono = BuscarColumna(ws, "Bono turno nocturno", 8) ' solo existe en 12x36
-    colPrest = BuscarColumna(ws, "Préstamo empresa", 8)
-    colPremioAsis = BuscarColumna(ws, "Premio de Asistencia", 8)
-    
-    If colCod = 0 Then Exit Sub
-    
-    ultimaFila = ws.Cells(ws.Rows.Count, colCod).End(xlUp).Row
-    
-    For fila = 9 To ultimaFila
-        If Trim(ws.Cells(fila, colCod).Value) <> "" Then
-            
-            codigo = NormalizaCodigo(ws.Cells(fila, colCod).Value)
-            
-            ' Horas extras
-            If colHX > 0 Then
-                val = Nz(ws.Cells(fila, colHX).Value)
-                If val <> 0 Then AgregaAlDic dicHX, codigo, val
-            End If
-            
-            ' Incentivo
-            If colInc > 0 Then
-                val = Nz(ws.Cells(fila, colInc).Value)
-                If val <> 0 Then AgregaAlDic dicInc, codigo, val
-            End If
-            
-            ' Bono nocturno
-            If colBono > 0 Then
-                val = Nz(ws.Cells(fila, colBono).Value)
-                If val <> 0 Then AgregaAlDic dicBonoNoc, codigo, val
-            End If
-            
-            ' Préstamo empresa
-            If colPrest > 0 Then
-                val = Nz(ws.Cells(fila, colPrest).Value)
-                If val <> 0 Then AgregaAlDic dicPrest, codigo, val
-            End If
-            
-            ' Premio de Asistencia (Bono Mensual)
-            If colPremioAsis > 0 Then
-                val = Nz(ws.Cells(fila, colPremioAsis).Value)
-                If val <> 0 Then AgregaAlDic dicBonoMensual, codigo, val
-            End If
-            
-        End If
-    Next fila
 
-End Sub
+    Const HEADER_ROW As Long = 8
+    Dim col As Object: Set col = CreateObject("Scripting.Dictionary")
+    
+    ' Find column indexes
+    col("Code") = BuscarColumna(ws, "Código", HEADER_ROW)
+    col("Name") = BuscarColumna(ws, "Nombre del empleado", HEADER_ROW)
+    col("OT") = BuscarColumna(ws, "Horas extras", HEADER_ROW)
+    col("Incentive") = BuscarColumna(ws, "Incentivo productividad", HEADER_ROW)
+    col("NightBonus") = BuscarColumna(ws, "Bono turno nocturno", HEADER_ROW)
+    col("Loan") = BuscarColumna(ws, "Préstamo empresa", HEADER_ROW)
+    col("MonthlyBonus") = BuscarColumna(ws, "Premio de Asistencia", HEADER_ROW)
 
-' =======================
-' Helpers generales
-' =======================
-
-Sub AgregaAlDic(dic As Object, clave As String, valor As Double)
-    If dic.Exists(clave) Then
-        dic(clave) = dic(clave) + valor
-    Else
-        dic.Add clave, valor
+    If col("Code") = 0 Then
+        MsgBox "No se encontró la columna 'Código' en la hoja '" & ws.Name & "'.", vbExclamation
+        Exit Sub
     End If
+
+    Dim ultimaFila As Long, r As Long
+    ultimaFila = ws.Cells(ws.Rows.Count, col("Code")).End(xlUp).Row
+
+    For r = HEADER_ROW + 1 To ultimaFila
+        Dim codigoVal As Variant
+        Dim nombreVal As String
+
+        codigoVal = ws.Cells(r, col("Code")).Value
+
+        ' --- Filter out invalid rows ---
+        If IsEmpty(codigoVal) Or Not IsNumeric(codigoVal) Then GoTo NextRow
+
+        If col("Name") > 0 Then
+            nombreVal = Trim(CStr(ws.Cells(r, col("Name")).Value))
+            If nombreVal Like "Departamento *" Or _
+               nombreVal Like "Total *" Or _
+               nombreVal Like "Reg. Pat.*" Then
+                GoTo NextRow
+            End If
+        End If
+
+        ' --- Row is valid, proceed ---
+        Dim empCode As String
+        empCode = NormalizaCodigo(codigoVal)
+
+        If empCode <> "" Then
+            Dim emp As Object
+            Set emp = GetEmployee(empCode, dicEmpleados)
+
+            ' Store corporate values
+            If emp("Name") = "" Then emp("Name") = nombreVal
+            If col("OT") > 0 Then emp("OT_Corp") = emp("OT_Corp") + Nz(ws.Cells(r, col("OT")).Value)
+            If col("Incentive") > 0 Then emp("Incentive_Corp") = emp("Incentive_Corp") + Nz(ws.Cells(r, col("Incentive")).Value)
+            If col("NightBonus") > 0 Then emp("NightBonus_Corp") = emp("NightBonus_Corp") + Nz(ws.Cells(r, col("NightBonus")).Value)
+            If col("Loan") > 0 Then emp("Loan_Corp") = emp("Loan_Corp") + Nz(ws.Cells(r, col("Loan")).Value)
+            If col("MonthlyBonus") > 0 Then emp("MonthlyBonus_Corp") = emp("MonthlyBonus_Corp") + Nz(ws.Cells(r, col("MonthlyBonus")).Value)
+        End If
+NextRow:
+    Next r
 End Sub
 
-Function BuscarColumna(ws As Worksheet, titulo As String, filaEncabezado As Long) As Long
-    Dim c As Range
-    For Each c In ws.Rows(filaEncabezado).Cells
-        If Trim(CStr(c.Value)) = titulo Then
-            BuscarColumna = c.Column
-            Exit Function
+' Loads data from the local RH report into the main dictionary.
+Sub CargarDatosRH(ws As Worksheet, dicEmpleados As Object)
+    Const HEADER_ROW As Long = 1
+    Dim col As Object: Set col = CreateObject("Scripting.Dictionary")
+
+    ' Find column indexes
+    col("Code") = BuscarColumna(ws, "No nomina", HEADER_ROW)
+    col("Name") = BuscarColumna(ws, "Nombre", HEADER_ROW)
+    col("OT") = BuscarColumna(ws, "Hrs Extra", HEADER_ROW)
+    col("Incentive") = BuscarColumna(ws, "Incentivo", HEADER_ROW)
+    col("NightBonus") = BuscarColumna(ws, "Bono nocturno", HEADER_ROW)
+    col("Loan") = BuscarColumna(ws, "Préstamo", HEADER_ROW)
+    col("MonthlyBonus") = BuscarColumna(ws, "Bono Mensual", HEADER_ROW)
+
+    If col("Code") = 0 Then
+        MsgBox "No se encontró la columna 'No nomina' en 'generador_reporte_semanal'.", vbCritical
+        Exit Sub
+    End If
+
+    Dim ultimaFila As Long, r As Long
+    ultimaFila = ws.Cells(ws.Rows.Count, col("Code")).End(xlUp).Row
+
+    For r = HEADER_ROW + 1 To ultimaFila
+        Dim empCode As String
+        empCode = NormalizaCodigo(ws.Cells(r, col("Code")).Value)
+
+        If empCode <> "" Then
+            Dim emp As Object
+            Set emp = GetEmployee(empCode, dicEmpleados)
+
+            ' Store RH values
+            If col("Name") > 0 And emp("Name") = "" Then emp("Name") = Trim(ws.Cells(r, col("Name")).Value)
+            If col("OT") > 0 Then emp("OT_RH") = emp("OT_RH") + Nz(ws.Cells(r, col("OT")).Value)
+            If col("Incentive") > 0 Then emp("Incentive_RH") = emp("Incentive_RH") + Nz(ws.Cells(r, col("Incentive")).Value)
+            If col("NightBonus") > 0 Then emp("NightBonus_RH") = emp("NightBonus_RH") + Nz(ws.Cells(r, col("NightBonus")).Value)
+            If col("Loan") > 0 Then emp("Loan_RH") = emp("Loan_RH") + Nz(ExtraeAbonoPrestamo(ws.Cells(r, col("Loan")).Value))
+            If col("MonthlyBonus") > 0 Then emp("MonthlyBonus_RH") = emp("MonthlyBonus_RH") + Nz(ws.Cells(r, col("MonthlyBonus")).Value)
         End If
-    Next c
-    BuscarColumna = 0
+    Next r
+End Sub
+
+' =================================================================================
+'                                DATA PROCESSING
+' =================================================================================
+
+' Iterates through all employees and calculates the status for each concept.
+Sub ProcesarDatosEmpleados(dicEmpleados As Object, tInc As Double, tBN As Double, tLoan As Double, tBM As Double)
+    Dim empCode As Variant
+    Dim emp As Object
+    
+    For Each empCode In dicEmpleados.Keys
+        Set emp = dicEmpleados(empCode)
+        Dim isOk As Boolean: isOk = True
+        Dim hasMovement As Boolean: hasMovement = False
+
+        ' Incentive
+        If Not (emp("Incentive_RH") = 0 And emp("Incentive_Corp") = 0) Then
+            hasMovement = True
+            emp("Incentive_Status") = IIf(Abs(emp("Incentive_RH") - emp("Incentive_Corp")) <= tInc, "OK", "Review")
+            If emp("Incentive_Status") = "Review" Then isOk = False
+        End If
+
+        ' Night Bonus
+        If Not (emp("NightBonus_RH") = 0 And emp("NightBonus_Corp") = 0) Then
+            hasMovement = True
+            emp("NightBonus_Status") = IIf(Abs(emp("NightBonus_RH") - emp("NightBonus_Corp")) <= tBN, "OK", "Review")
+            If emp("NightBonus_Status") = "Review" Then isOk = False
+        End If
+
+        ' Loan
+        If Not (emp("Loan_RH") = 0 And emp("Loan_Corp") = 0) Then
+            hasMovement = True
+            emp("Loan_Status") = IIf(Abs(emp("Loan_RH") - emp("Loan_Corp")) <= tLoan, "OK", "Review")
+            If emp("Loan_Status") = "Review" Then isOk = False
+        End If
+
+        ' Monthly Bonus
+        If Not (emp("MonthlyBonus_RH") = 0 And emp("MonthlyBonus_Corp") = 0) Then
+            hasMovement = True
+            emp("MonthlyBonus_Status") = IIf(Abs(emp("MonthlyBonus_RH") - emp("MonthlyBonus_Corp")) <= tBM, "OK", "Review")
+            If emp("MonthlyBonus_Status") = "Review" Then isOk = False
+        End If
+
+        ' R2: Special Overtime Logic (Presence/Absence)
+        Dim hasOT_RH As Boolean: hasOT_RH = (emp("OT_RH") > 0)
+        Dim hasOT_Corp As Boolean: hasOT_Corp = (emp("OT_Corp") > 0)
+
+        If hasOT_RH Or hasOT_Corp Then
+            hasMovement = True
+            If hasOT_RH And hasOT_Corp Then
+                emp("OT_Status") = "OK"
+            Else
+                emp("OT_Status") = "Review"
+                isOk = False
+            End If
+        End If
+
+        ' Set Global Status based on movement
+        If hasMovement Then
+            emp("Global_Status") = IIf(isOk, "OK", "Review")
+        Else
+            emp("Global_Status") = ""
+        End If
+    Next empCode
+End Sub
+
+
+' =================================================================================
+'                                 OUTPUT REPORTING
+' =================================================================================
+
+' Creates the final "Comparison" report sheet with all data and formatting.
+Sub GenerarReporte(wb As Workbook, dicEmpleados As Object)
+    ' --- 1. Setup Worksheet ---
+    Dim wsOut As Worksheet
+    On Error Resume Next
+    Application.DisplayAlerts = False
+    wb.Worksheets("Comparison").Delete
+    Application.DisplayAlerts = True
+    On Error GoTo 0
+    
+    Set wsOut = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+    wsOut.Name = "Comparison"
+
+    ' --- 2. Write Header ---
+    Dim headers As Variant
+    headers = Array( _
+        "Estatus global", "No nomina", "Nombre", _
+        "Incentivo", "Incentivo productividad", _
+        "Bono nocturno", "Bono turno nocturno", _
+        "Hrs Extra", "Horas extras", _
+        "Préstamo", "Préstamo empresa", _
+        "Bono Mensual", "Premio de Asistencia" _
+    )
+    wsOut.Range("A1").Resize(1, UBound(headers) + 1).Value = headers
+
+    ' --- 3. Write Data ---
+    Dim empCode As Variant, emp As Object
+    Dim r As Long: r = 2
+    Dim HIGHLIGHT_COLOR As Long
+    HIGHLIGHT_COLOR = RGB(255, 204, 204) ' Light Red
+    
+    For Each empCode In dicEmpleados.Keys
+        Set emp = dicEmpleados(empCode)
+        
+        ' Skip employees with no movements
+        If emp("Global_Status") <> "" Then
+            wsOut.Cells(r, 1).Value = emp("Global_Status")
+            wsOut.Cells(r, 2).Value = empCode
+            wsOut.Cells(r, 3).Value = emp("Name")
+            
+            wsOut.Cells(r, 4).Value = emp("Incentive_RH")
+            wsOut.Cells(r, 5).Value = emp("Incentive_Corp")
+            
+            wsOut.Cells(r, 6).Value = emp("NightBonus_RH")
+            wsOut.Cells(r, 7).Value = emp("NightBonus_Corp")
+            
+            wsOut.Cells(r, 8).Value = emp("OT_RH")
+            wsOut.Cells(r, 9).Value = emp("OT_Corp")
+            
+            wsOut.Cells(r, 10).Value = emp("Loan_RH")
+            wsOut.Cells(r, 11).Value = emp("Loan_Corp")
+            
+            wsOut.Cells(r, 12).Value = emp("MonthlyBonus_RH")
+            wsOut.Cells(r, 13).Value = emp("MonthlyBonus_Corp")
+
+            ' --- 3b. Highlight Discrepancies ---
+            If emp("Incentive_Status") = "Review" Then wsOut.Range("D" & r & ":E" & r).Interior.Color = HIGHLIGHT_COLOR
+            If emp("NightBonus_Status") = "Review" Then wsOut.Range("F" & r & ":G" & r).Interior.Color = HIGHLIGHT_COLOR
+            If emp("OT_Status") = "Review" Then wsOut.Range("H" & r & ":I" & r).Interior.Color = HIGHLIGHT_COLOR
+            If emp("Loan_Status") = "Review" Then wsOut.Range("J" & r & ":K" & r).Interior.Color = HIGHLIGHT_COLOR
+            If emp("MonthlyBonus_Status") = "Review" Then wsOut.Range("L" & r & ":M" & r).Interior.Color = HIGHLIGHT_COLOR
+            
+            r = r + 1
+        End If
+    Next empCode
+    
+    ' --- 4. Final Touches (Formatting and Sorting) ---
+    If wsOut.AutoFilterMode Then wsOut.AutoFilterMode = False
+    wsOut.Columns.AutoFit
+
+    Call ApplyFormattingAndSorting(wsOut)
+End Sub
+
+' Applies conditional formatting and sorting to the final report.
+Sub ApplyFormattingAndSorting(ws As Worksheet)
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    If lastRow <= 1 Then Exit Sub
+    
+    Dim reportRange As Range
+    Set reportRange = ws.Range("A1").CurrentRegion
+    
+    ' --- 1. Conditional Formatting for Global Status Column ---
+    Dim statusRange As Range
+    Set statusRange = ws.Range("A2:A" & lastRow)
+    
+    ' Rule for "OK" (Green)
+    Dim okRule As FormatCondition
+    Set okRule = statusRange.FormatConditions.Add(Type:=xlCellValue, Operator:=xlEqual, Formula1:="=""OK""")
+    With okRule.Interior
+        .PatternColorIndex = xlAutomatic
+        .Color = RGB(204, 255, 204) ' Light Green
+        .TintAndShade = 0
+    End With
+    
+    ' Rule for "Review" (Red)
+    Dim reviewRule As FormatCondition
+    Set reviewRule = statusRange.FormatConditions.Add(Type:=xlCellValue, Operator:=xlEqual, Formula1:="=""Review""")
+    With reviewRule.Interior
+        .PatternColorIndex = xlAutomatic
+        .Color = RGB(255, 204, 204) ' Light Red
+        .TintAndShade = 0
+    End With
+    
+    ' --- 2. Sorting ---
+    With ws.Sort
+        .SortFields.Clear
+        .SortFields.Add Key:=ws.Range("A2:A" & lastRow), SortOn:=xlSortOnValues, Order:=xlDescending, DataOption:=xlSortNormal ' "Review" before "OK"
+        .SortFields.Add Key:=ws.Range("B2:B" & lastRow), SortOn:=xlSortOnValues, Order:=xlAscending, DataOption:=xlSortNormal ' EmpCode
+        .SetRange reportRange
+        .Header = xlYes
+        .MatchCase = False
+        .Orientation = xlTopToBottom
+        .SortMethod = xlPinYin
+        .Apply
+    End With
+End Sub
+
+' =================================================================================
+'                                   HELPER FUNCTIONS
+' =================================================================================
+
+' Retrieves an employee data object from the dictionary or creates a new one.
+Function GetEmployee(empCode As String, dic As Object) As Object
+    If Not dic.Exists(empCode) Then
+        Dim emp As Object: Set emp = CreateObject("Scripting.Dictionary")
+        emp.CompareMode = vbTextCompare
+        emp("Name") = ""
+        emp("Incentive_RH") = 0: emp("Incentive_Corp") = 0: emp("Incentive_Status") = ""
+        emp("NightBonus_RH") = 0: emp("NightBonus_Corp") = 0: emp("NightBonus_Status") = ""
+        emp("OT_RH") = 0: emp("OT_Corp") = 0: emp("OT_Status") = ""
+        emp("Loan_RH") = 0: emp("Loan_Corp") = 0: emp("Loan_Status") = ""
+        emp("MonthlyBonus_RH") = 0: emp("MonthlyBonus_Corp") = 0: emp("MonthlyBonus_Status") = ""
+        emp("Global_Status") = ""
+        dic.Add empCode, emp
+    End If
+    Set GetEmployee = dic(empCode)
 End Function
 
+' Finds a column number in a worksheet by its title.
+Function BuscarColumna(ws As Worksheet, titulo As String, filaEncabezado As Long) As Long
+    Dim c As Range
+    On Error Resume Next
+    BuscarColumna = ws.Rows(filaEncabezado).Find(What:=titulo, LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False).Column
+    On Error GoTo 0
+End Function
+
+' Normalizes an employee code (trims, removes leading zeros).
 Function NormalizaCodigo(valor As Variant) As String
     Dim s As String
     s = Trim(CStr(valor))
     If IsNumeric(s) Then
-        s = CStr(CLng(s))  ' quita ceros a la izquierda
+        s = CStr(CLng(s))
     End If
     NormalizaCodigo = s
 End Function
 
+' Converts a variant to a double, returning 0 if empty, error, or non-numeric.
 Function Nz(v As Variant) As Double
-    If IsError(v) Then
+    If IsError(v) Or IsEmpty(v) Or v = "" Then
         Nz = 0
-    ElseIf IsEmpty(v) Then
-        Nz = 0
-    ElseIf v = "" Then
-        Nz = 0
+    ElseIf IsNumeric(v) Then
+        Nz = CDbl(v)
     Else
-        Nz = v
+        Nz = 0
     End If
 End Function
 
+' Extracts the loan payment amount from a string like "100 (2/10)".
 Function ExtraeAbonoPrestamo(v As Variant) As Double
-    ' Convierte "100 (2/10)" en 100
-    Dim s As String
-    s = Trim(CStr(v))
-    If s = "" Then
-        ExtraeAbonoPrestamo = 0
-    Else
-        ExtraeAbonoPrestamo = Val(s)
-    End If
+    ExtraeAbonoPrestamo = Val(Trim(CStr(v)))
 End Function
 
-Sub LlenarFilaSalida(ws As Worksheet, ByVal filaOut As Long, _
-                     ByVal noNomina As String, ByVal nombre As String, _
-                     ByVal concepto As String, _
-                     ByVal montoRep As Double, ByVal montoCorp As Double, _
-                     ByVal diff As Double, ByVal toler As Double)
-    
-    ws.Cells(filaOut, 1).Value = noNomina
-    ws.Cells(filaOut, 2).Value = nombre
-    ws.Cells(filaOut, 3).Value = concepto
-    ws.Cells(filaOut, 4).Value = montoRep
-    ws.Cells(filaOut, 5).Value = montoCorp
-    ws.Cells(filaOut, 6).Value = diff
-    
-    If montoRep = 0 And montoCorp = 0 Then
-        ws.Cells(filaOut, 7).Value = "Sin movimiento"
-    ElseIf Abs(diff) <= toler Then
-        ws.Cells(filaOut, 7).Value = "OK (dentro de tolerancia)"
-    Else
-        ws.Cells(filaOut, 7).Value = "Revisar"
-    End If
-    
-    ws.Cells(filaOut, 8).Value = ""  ' espacio libre por si luego quieres notas manuales
-
-End Sub
