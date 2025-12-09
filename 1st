@@ -198,11 +198,19 @@ Sub ProcesarDatosEmpleados(dicEmpleados As Object, tInc As Double, tBN As Double
         Dim isOk As Boolean: isOk = True
         Dim hasMovement As Boolean: hasMovement = False
 
-        ' Incentive
-        If Not (emp("Incentive_RH") = 0 And emp("Incentive_Corp") = 0) Then
+        ' Incentive: solo validar presencia/ausencia
+        Dim hasInc_RH As Boolean, hasInc_Corp As Boolean
+        hasInc_RH = (emp("Incentive_RH") > 0)
+        hasInc_Corp = (emp("Incentive_Corp") > 0)
+
+        If hasInc_RH Or hasInc_Corp Then
             hasMovement = True
-            emp("Incentive_Status") = IIf(Abs(emp("Incentive_RH") - emp("Incentive_Corp")) <= tInc, "OK", "Review")
-            If emp("Incentive_Status") = "Review" Then isOk = False
+            If hasInc_RH And hasInc_Corp Then
+                emp("Incentive_Status") = "OK"
+            Else
+                emp("Incentive_Status") = "Review"
+                isOk = False
+            End If
         End If
 
         ' Night Bonus
@@ -219,11 +227,19 @@ Sub ProcesarDatosEmpleados(dicEmpleados As Object, tInc As Double, tBN As Double
             If emp("Loan_Status") = "Review" Then isOk = False
         End If
 
-        ' Monthly Bonus
-        If Not (emp("MonthlyBonus_RH") = 0 And emp("MonthlyBonus_Corp") = 0) Then
+        ' Monthly Bonus / Premio de Asistencia: solo presencia/ausencia
+        Dim hasBM_RH As Boolean, hasBM_Corp As Boolean
+        hasBM_RH = (emp("MonthlyBonus_RH") > 0)
+        hasBM_Corp = (emp("MonthlyBonus_Corp") > 0)
+
+        If hasBM_RH Or hasBM_Corp Then
             hasMovement = True
-            emp("MonthlyBonus_Status") = IIf(Abs(emp("MonthlyBonus_RH") - emp("MonthlyBonus_Corp")) <= tBM, "OK", "Review")
-            If emp("MonthlyBonus_Status") = "Review" Then isOk = False
+            If hasBM_RH And hasBM_Corp Then
+                emp("MonthlyBonus_Status") = "OK"
+            Else
+                emp("MonthlyBonus_Status") = "Review"
+                isOk = False
+            End If
         End If
 
         ' R2: Special Overtime Logic (Presence/Absence)
