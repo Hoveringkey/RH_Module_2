@@ -95,7 +95,7 @@ Sub CargarDatosCorporativo(ws As Worksheet, dicEmpleados As Object)
     col("Incentive") = BuscarColumna(ws, "Incentivo productividad", HEADER_ROW)
     col("NightBonus") = BuscarColumna(ws, "Bono turno nocturno", HEADER_ROW)
     col("Loan") = BuscarColumna(ws, "Préstamo empresa", HEADER_ROW)
-    col("MonthlyBonus") = BuscarColumna(ws, "Premio de Asistencia", HEADER_ROW)
+    col("MonthlyBonus") = BuscarColumna(ws, "Asistencia", HEADER_ROW)
 
     If col("Code") = 0 Then
         MsgBox "No se encontró la columna 'Código' en la hoja '" & ws.Name & "'.", vbExclamation
@@ -134,10 +134,10 @@ Sub CargarDatosCorporativo(ws As Worksheet, dicEmpleados As Object)
             ' Store corporate values
             If emp("Name") = "" Then emp("Name") = nombreVal
             If col("OT") > 0 Then emp("OT_Corp") = emp("OT_Corp") + Nz(ws.Cells(r, col("OT")).Value)
-            If col("Incentive") > 0 Then emp("Incentive_Corp") = emp("Incentive_Corp") + Nz(ws.Cells(r, col("Incentive")).Value)
-            If col("NightBonus") > 0 Then emp("NightBonus_Corp") = emp("NightBonus_Corp") + Nz(ws.Cells(r, col("NightBonus")).Value)
-            If col("Loan") > 0 Then emp("Loan_Corp") = emp("Loan_Corp") + Nz(ws.Cells(r, col("Loan")).Value)
-            If col("MonthlyBonus") > 0 Then emp("MonthlyBonus_Corp") = emp("MonthlyBonus_Corp") + Nz(ws.Cells(r, col("MonthlyBonus")).Value)
+            If col("Incentive") > 0 Then emp("Incentive_Corp") = emp("Incentive_Corp") + ExtraerMonto(ws.Cells(r, col("Incentive")).Value)
+            If col("NightBonus") > 0 Then emp("NightBonus_Corp") = emp("NightBonus_Corp") + ExtraerMonto(ws.Cells(r, col("NightBonus")).Value)
+            If col("Loan") > 0 Then emp("Loan_Corp") = emp("Loan_Corp") + ExtraerMonto(ws.Cells(r, col("Loan")).Value)
+            If col("MonthlyBonus") > 0 Then emp("MonthlyBonus_Corp") = emp("MonthlyBonus_Corp") + ExtraerMonto(ws.Cells(r, col("MonthlyBonus")).Value)
         End If
 NextRow:
     Next r
@@ -176,10 +176,10 @@ Sub CargarDatosRH(ws As Worksheet, dicEmpleados As Object)
             ' Store RH values
             If col("Name") > 0 And emp("Name") = "" Then emp("Name") = Trim(ws.Cells(r, col("Name")).Value)
             If col("OT") > 0 Then emp("OT_RH") = emp("OT_RH") + Nz(ws.Cells(r, col("OT")).Value)
-            If col("Incentive") > 0 Then emp("Incentive_RH") = emp("Incentive_RH") + Nz(ws.Cells(r, col("Incentive")).Value)
-            If col("NightBonus") > 0 Then emp("NightBonus_RH") = emp("NightBonus_RH") + Nz(ws.Cells(r, col("NightBonus")).Value)
-            If col("Loan") > 0 Then emp("Loan_RH") = emp("Loan_RH") + Nz(ExtraeAbonoPrestamo(ws.Cells(r, col("Loan")).Value))
-            If col("MonthlyBonus") > 0 Then emp("MonthlyBonus_RH") = emp("MonthlyBonus_RH") + Nz(ws.Cells(r, col("MonthlyBonus")).Value)
+            If col("Incentive") > 0 Then emp("Incentive_RH") = emp("Incentive_RH") + ExtraerMonto(ws.Cells(r, col("Incentive")).Value)
+            If col("NightBonus") > 0 Then emp("NightBonus_RH") = emp("NightBonus_RH") + ExtraerMonto(ws.Cells(r, col("NightBonus")).Value)
+            If col("Loan") > 0 Then emp("Loan_RH") = emp("Loan_RH") + ExtraerMonto(ws.Cells(r, col("Loan")).Value)
+            If col("MonthlyBonus") > 0 Then emp("MonthlyBonus_RH") = emp("MonthlyBonus_RH") + ExtraerMonto(ws.Cells(r, col("MonthlyBonus")).Value)
         End If
     Next r
 End Sub
@@ -393,12 +393,63 @@ Function GetEmployee(empCode As String, dic As Object) As Object
     Set GetEmployee = dic(empCode)
 End Function
 
-' Finds a column number in a worksheet by its title.
+' Finds a column number in a worksheet by its title (tolerant search).
 Function BuscarColumna(ws As Worksheet, titulo As String, filaEncabezado As Long) As Long
-    Dim c As Range
-    On Error Resume Next
-    BuscarColumna = ws.Rows(filaEncabezado).Find(What:=titulo, LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False).Column
-    On Error GoTo 0
+    Dim lastCol As Long, c As Long
+    Dim valCelda As String, objetivo As String
+
+    lastCol = ws.Cells(filaEncabezado, ws.Columns.Count).End(xlToLeft).Column
+    objetivo = LCase$(Trim$(titulo))
+
+    For c = 1 To lastCol
+        valCelda = LCase$(Trim$(CStr(ws.Cells(filaEncabezado, c).Value)))
+        If InStr(1, valCelda, objetivo, vbTextCompare) > 0 Then
+            BuscarColumna = c
+            Exit Function
+        End If
+    Next c
+
+    BuscarColumna = 0
+End Function
+
+' Extracts the first numeric value from a mixed string.
+Function ExtraerMonto(texto As Variant) As Double
+    Dim s As String, i As Long, L As Long
+    Dim c As String
+    Dim temp As String
+    Dim foundNumber As Boolean
+
+    If IsError(texto) Or IsEmpty(texto) Then
+        ExtraerMonto = 0
+        Exit Function
+    End If
+
+    s = Trim(CStr(texto))
+    L = Len(s)
+    temp = ""
+    foundNumber = False
+
+    For i = 1 To L
+        c = Mid(s, i, 1)
+
+        If Not foundNumber Then
+            ' Check for start of number: digit, or minus sign followed by digit
+            If (c >= "0" And c <= "9") Or (c = "-" And i < L And IsNumeric(Mid(s, i + 1, 1))) Then
+                foundNumber = True
+                temp = temp & c
+            End If
+        Else
+            ' Accumulate number: digits and dots
+            If (c >= "0" And c <= "9") Or c = "." Then
+                temp = temp & c
+            Else
+                ' Stop at first non-numeric char (except dot)
+                Exit For
+            End If
+        End If
+    Next i
+
+    ExtraerMonto = Val(temp)
 End Function
 
 ' Normalizes an employee code (trims, removes leading zeros).
